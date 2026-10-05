@@ -34,6 +34,11 @@ Models of this size are usually served from a GPU cluster. A MoE model only read
 
 It is the first open-source release from [Meld Labs](https://meldlabs.ai).
 
+https://github.com/user-attachments/assets/5787a5b1-2af7-41f1-9bef-a13976c2e2f4
+
+<p align="center"><sub>Real use on a MacBook Pro M2 Max, 96 GB: the built-in chat UI writing a Python script, thinking off. Idle pauses are trimmed; the speed is not edited.<br>
+<b>No player above?</b> Open <a href="docs/media/meld-turbo-demo.mp4">docs/media/meld-turbo-demo.mp4</a> — the same video — in this repository.</sub></p>
+
 ## Results
 
 MacBook Pro 14" · M2 Max (38-core GPU) · 96 GB · ~400 GB/s
