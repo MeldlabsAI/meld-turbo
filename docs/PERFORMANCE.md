@@ -58,8 +58,11 @@ Simulated on the 96 GB MacBook Pro: `sudo sysctl iogpu.wired_limit_mb=48000` (th
 | Q2_0-d8, 32K | 41–42 GB | 35.7 tok/s | 234 tok/s |
 | Q2_0-d8, 128K (default) | 44–45 GB | 35.3 tok/s | 222 tok/s |
 | Q2_0-d8, 128K, ~8,000-token prompt | 46 GB | 31.4 tok/s | 205 tok/s |
+| Q2_0-d8, 128K, ~32,000-token prompt (29 GiB locked) | 47 GB | 25.9 tok/s | 217 tok/s |
+| Q2_0-d8, 128K, after 10 min idle (cool) | 44–45 GB | 44.0 tok/s | 284 tok/s |
+| same, 5 back-to-back runs of 512 tokens | 47 GB peak | 36–42 tok/s (median 40.3) | 252–323 tok/s |
 
-All runs started and finished normally. Most layers are linear-attention, so the context costs little memory. The rest of the system is squeezed (~5% free, other apps compressed or swapped), so close memory-heavy apps on a 64 GB Mac.
+All runs started and finished normally. The earlier rows ran on a warm machine; the cool rows match the 96 GB results. Most layers are linear-attention, so the context costs little memory. The rest of the system is squeezed (~5% free, other apps compressed or swapped), so close memory-heavy apps on a 64 GB Mac.
 
 ## Tried, no gain
 

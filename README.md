@@ -9,8 +9,8 @@
 <p align="center"><strong>A 125B-parameter model, fully local, on a MacBook.</strong><br>
 Qwen3.8-Flash-Next at ~45 tokens/s on Apple silicon — no cloud, no API key, nothing leaves your Mac.</p>
 
-<p align="center">🏁 <b>The fastest published result for this model on M2-generation Macs</b><br>
-<sub>to our knowledge, as of October 2026</sub></p>
+<p align="center">🏁 <b>~45 tokens/s on a 2023 MacBook Pro (M2 Max) — and it fits in 64 GB</b><br>
+<sub>64 GB measured in a simulation so far — <a href="https://github.com/MeldlabsAI/meld-turbo/issues/1">help us confirm it on a real one</a></sub></p>
 
 <p align="center">
   <a href="https://meldlabs.ai/meld-turbo"><b>Project page</b></a> ·
@@ -64,7 +64,7 @@ Numbers are end-to-end through the API with speculative decoding on. See [docs/P
 
 You need a Mac with Apple silicon (Max-class GPU or better) and **64 GB of unified memory or more** (96 GB recommended), plus Xcode command-line tools, CMake, Python 3 with `numpy`, and about 110 GB of free disk.
 
-Tested on 96 GB. For 64 GB we ran a simulation on the 96 GB Mac: GPU memory capped at the 48 GB that macOS allows on a 64 GB machine, and 32 GB of RAM locked away. The default settings fit: the server uses 44–46 GB and generates at ~31–38 tok/s. Close memory-heavy apps first, and if the server does not start, try `CTX=32768`. Not yet confirmed on a real 64 GB Mac, so reports are welcome.
+Tested on 96 GB. **64 GB works in a simulation** on the 96 GB Mac (GPU memory capped at the 48 GB that macOS allows on a 64 GB machine, 32 GB of RAM locked away): with the default settings the server uses 44–47 GB and generates at ~44 tok/s, 36–42 tok/s sustained. Close memory-heavy apps first, and if the server does not start, try `CTX=32768`. Have a real 64 GB Mac? Please post a run in [issue #1](https://github.com/MeldlabsAI/meld-turbo/issues/1).
 
 ```zsh
 git clone https://github.com/MeldlabsAI/meld-turbo && cd meld-turbo

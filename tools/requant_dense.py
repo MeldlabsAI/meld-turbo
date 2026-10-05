@@ -10,10 +10,13 @@ Experts, token embedding (read one row per token), BF16/F32 and Q2_0/Q4_0 tensor
 byte for byte. Metadata, split keys and tensor order are kept, so a split model still loads with
 its other shards (symlink them next to the output).
 
-    python3 tools/requant_dense.py <in.gguf> <out.gguf> [--types Q3_K,Q4_K,...] [--keep output.weight] [--dry-run]
+    python3 tools/requant_dense.py <in.gguf> <out.gguf> [--types Q3_K,Q4_K,...] [--keep output.weight] [--only REGEX] [--dry-run]
+
+--only limits the conversion to tensors whose name matches REGEX (e.g. --types BF16 --only 'hc_.*_down').
 """
 import argparse
 import os
+import re
 import sys
 import time
 
@@ -37,13 +40,15 @@ def main():
     ap.add_argument("dst")
     ap.add_argument("--types", default=DEFAULT_TYPES)
     ap.add_argument("--keep", default="", help="comma-separated tensor names to copy unchanged")
+    ap.add_argument("--only", default="", help="regex; convert only tensors whose name matches")
     ap.add_argument("--dry-run", action="store_true")
     a = ap.parse_args()
     types = {QT[x] for x in a.types.split(",")}
 
     r = gguf.GGUFReader(a.src)
     keep = set(filter(None, a.keep.split(",")))
-    conv = [t for t in r.tensors if wanted(t, types) and t.name not in keep]
+    only = re.compile(a.only) if a.only else None
+    conv = [t for t in r.tensors if wanted(t, types) and t.name not in keep and (only is None or only.search(t.name))]
     before = sum(int(t.n_bytes) for t in conv)
     after = sum(int(t.n_elements) // 32 * 34 for t in conv)
     print(f"{len(conv)} tensors -> Q8_0: {before / 1e9:.3f} GB -> {after / 1e9:.3f} GB")
