@@ -62,9 +62,9 @@ Numbers are end-to-end through the API with speculative decoding on. See [docs/P
 
 ## Quick start
 
-You need a Mac with Apple silicon (Max-class GPU or better) and **96 GB of unified memory or more**, plus Xcode command-line tools, CMake, Python 3 with `numpy`, and about 110 GB of free disk.
+You need a Mac with Apple silicon (Max-class GPU or better) and **64 GB of unified memory or more** (96 GB recommended), plus Xcode command-line tools, CMake, Python 3 with `numpy`, and about 110 GB of free disk.
 
-Tested on 96 GB. 64 GB should work with a smaller context (`CTX=16384`) and the original Q2_0 file instead of the re-encoded one. That setup is untested and will be slower, so reports are welcome.
+Tested on 96 GB. For 64 GB we ran a simulation on the 96 GB Mac: GPU memory capped at the 48 GB that macOS allows on a 64 GB machine, and 32 GB of RAM locked away. The default settings fit: the server uses 44–46 GB and generates at ~31–38 tok/s. Close memory-heavy apps first, and if the server does not start, try `CTX=32768`. Not yet confirmed on a real 64 GB Mac, so reports are welcome.
 
 ```zsh
 git clone https://github.com/MeldlabsAI/meld-turbo && cd meld-turbo

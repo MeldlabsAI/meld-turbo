@@ -47,6 +47,20 @@ English-only subsets collapse on Chinese text. Use the 106K list for general use
 
 The GPU holds its top frequency (1398 MHz) for only ~3 s of continuous load; then a 4-token verify pass goes from ~48 ms to ~63–70 ms (measured with `tools/gpu_pstate.c` and Metal command-buffer timestamps). Thermal state stays "Nominal", so this looks like a power budget. Short benchmarks are therefore optimistic. Judge changes by sustained runs or end-to-end server throughput, and alternate A/B runs.
 
+## 64 GB Macs (simulated)
+
+Simulated on the 96 GB MacBook Pro: `sudo sysctl iogpu.wired_limit_mb=48000` (the GPU limit macOS uses on a 64 GB machine) and a helper process holding 32 GiB of RAM locked. `bench/api_bench.py`, ~1,000-token code prompt unless noted:
+
+| Model, context | Server memory | Decode | Prompt |
+|---|---:|---:|---:|
+| Original Q2_0, 16K | 39–40 GB | 33.3 tok/s | 259 tok/s |
+| Q2_0-d8, 16K | 41–42 GB | 38.4 tok/s | 254 tok/s |
+| Q2_0-d8, 32K | 41–42 GB | 35.7 tok/s | 234 tok/s |
+| Q2_0-d8, 128K (default) | 44–45 GB | 35.3 tok/s | 222 tok/s |
+| Q2_0-d8, 128K, ~8,000-token prompt | 46 GB | 31.4 tok/s | 205 tok/s |
+
+All runs started and finished normally. Most layers are linear-attention, so the context costs little memory. The rest of the system is squeezed (~5% free, other apps compressed or swapped), so close memory-heavy apps on a 64 GB Mac.
+
 ## Tried, no gain
 
 - Fused hyper-connection op (`MELD_HC_MIX=1`): correct, 31/31 op tests, identical output, but ±3% end to end.
