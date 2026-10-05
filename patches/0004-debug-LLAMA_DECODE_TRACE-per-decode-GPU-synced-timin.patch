@@ -1,0 +1,71 @@
+From 9351d3d23a39358476fb98e6e70e2ec5db4fb632 Mon Sep 17 00:00:00 2001
+From: Tim <338195936+tim-meld@users.noreply.github.com>
+Date: Mon, 5 Oct 2026 05:17:46 +0800
+Subject: [PATCH 04/12] debug: LLAMA_DECODE_TRACE (per-decode GPU-synced
+ timing) and LLAMA_GRAPH_HIST (op histogram per graph size)
+
+Both off unless the environment variable is set.
+---
+ src/llama-context.cpp | 34 ++++++++++++++++++++++++++++++++++
+ 1 file changed, 34 insertions(+)
+
+diff --git a/src/llama-context.cpp b/src/llama-context.cpp
+index f28ae94..7e04a0c 100644
+--- a/src/llama-context.cpp
++++ b/src/llama-context.cpp
+@@ -16,6 +16,9 @@
+ #include <cinttypes>
+ #include <cmath>
+ #include <cstring>
++#include <map>
++#include <set>
++#include <cstdlib>
+ #include <limits>
+ #include <stdexcept>
+ #include <string>
+@@ -2520,6 +2523,27 @@ llm_graph_params llama_context::graph_params(
+ ggml_status llama_context::graph_compute(
+             ggml_cgraph * gf,
+                    bool   batched) {
++    // meld-turbo: LLAMA_GRAPH_HIST=1 prints, once per distinct graph size, an op histogram of the graph
++    // (op + src0 type for matmuls / get_rows), to compare e.g. a server verify pass with llama-bench.
++    if (getenv("LLAMA_GRAPH_HIST")) {
++        static std::set<int> seen;
++        const int nn = ggml_graph_n_nodes(gf);
++        if (seen.insert(nn).second) {
++            std::map<std::string, int> h;
++            for (int i = 0; i < nn; ++i) {
++                ggml_tensor * t = ggml_graph_node(gf, i);
++                if (t->op == GGML_OP_NONE || t->op == GGML_OP_VIEW || t->op == GGML_OP_RESHAPE || t->op == GGML_OP_PERMUTE || t->op == GGML_OP_TRANSPOSE) continue;
++                std::string k = ggml_op_desc(t);
++                if ((t->op == GGML_OP_MUL_MAT || t->op == GGML_OP_MUL_MAT_ID || t->op == GGML_OP_GET_ROWS) && t->src[0]) {
++                    k += std::string("(") + ggml_type_name(t->src[0]->type) + ")";
++                }
++                h[k + " ne=" + std::to_string(t->ne[0]) + "x" + std::to_string(t->ne[1])]++;
++            }
++            fprintf(stderr, "graphhist BEGIN nodes=%d ctx=%p\n", nn, (void *) this);
++            for (auto & [k, c] : h) fprintf(stderr, "graphhist %5d %s\n", c, k.c_str());
++            fprintf(stderr, "graphhist END\n");
++        }
++    }
+     int n_threads        = batched ? cparams.n_threads_batch : cparams.n_threads;
+     ggml_threadpool_t tp = batched ? threadpool_batch        : threadpool;
+ 
+@@ -4277,7 +4301,17 @@ int32_t llama_encode(
+ int32_t llama_decode(
+         llama_context * ctx,
+           llama_batch   batch) {
++    // meld-turbo: LLAMA_DECODE_TRACE=1 logs every decode (synchronized, so the time includes the GPU):
++    //   dectrace <start ms> <duration ms> ctx=<context> n=<tokens>
++    // Gaps between consecutive lines are host-side time (sampling, server logic, the next submit).
++    static const bool trace = getenv("LLAMA_DECODE_TRACE") != nullptr;
++    const int64_t t0 = trace ? ggml_time_us() : 0;
+     const int ret = ctx->decode(batch);
++    if (trace) {
++        llama_synchronize(ctx);
++        const int64_t t1 = ggml_time_us();
++        fprintf(stderr, "dectrace %.3f %.3f ctx=%p n=%d\n", t0 / 1000.0, (t1 - t0) / 1000.0, (void *) ctx, batch.n_tokens);
++    }
+     if (ret != 0 && ret != 1) {
+         LLAMA_LOG_ERROR("%s: failed to decode, ret = %d\n", __func__, ret);
+     }

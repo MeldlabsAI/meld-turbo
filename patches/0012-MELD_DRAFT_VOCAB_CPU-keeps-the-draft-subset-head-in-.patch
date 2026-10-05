@@ -1,0 +1,56 @@
+From 55449b0510d4eb53988d6bb3bcfb417dd0c9cf34 Mon Sep 17 00:00:00 2001
+From: Tim <338195936+tim-meld@users.noreply.github.com>
+Date: Mon, 5 Oct 2026 16:33:47 +0800
+Subject: [PATCH 12/12] MELD_DRAFT_VOCAB_CPU keeps the draft subset head in
+ host memory (CPU drafts 11 -> 5.6 ms/step); llama-bench
+ MELD_BENCH_DRAFT_BLOCK alternates blocks with and without draft steps
+
+---
+ src/llama-context.cpp             |  5 ++++-
+ tools/llama-bench/llama-bench.cpp | 16 +++++++++++++++-
+ 2 files changed, 19 insertions(+), 2 deletions(-)
+
+diff --git a/src/llama-context.cpp b/src/llama-context.cpp
+index 3d2f9f6..9ab1cd8 100644
+--- a/src/llama-context.cpp
++++ b/src/llama-context.cpp
+@@ -529,7 +529,10 @@ void llama_context::init_draft_vocab(const char * path) {
+     ggml_tensor * tid = ggml_new_tensor_1d(draft_vocab_ctx.get(), GGML_TYPE_I32, (int64_t) ids.size());
+     ggml_set_name(sub, "draft_vocab_head");
+     ggml_set_name(tid, "draft_vocab_ids");
+-    draft_vocab_buf.reset(ggml_backend_alloc_ctx_tensors_from_buft(draft_vocab_ctx.get(), ggml_backend_buffer_get_type(head->buffer)));
++    // MELD_DRAFT_VOCAB_CPU=1 keeps the subset head in host memory, for a draft context that runs on the CPU
++    ggml_backend_buffer_type_t dv_buft = getenv("MELD_DRAFT_VOCAB_CPU") ? ggml_backend_cpu_buffer_type()
++                                                                         : ggml_backend_buffer_get_type(head->buffer);
++    draft_vocab_buf.reset(ggml_backend_alloc_ctx_tensors_from_buft(draft_vocab_ctx.get(), dv_buft));
+     if (!draft_vocab_buf) {
+         throw std::runtime_error("draft vocabulary: buffer allocation failed");
+     }
+diff --git a/tools/llama-bench/llama-bench.cpp b/tools/llama-bench/llama-bench.cpp
+index 539548a..ab5d2ed 100644
+--- a/tools/llama-bench/llama-bench.cpp
++++ b/tools/llama-bench/llama-bench.cpp
+@@ -2259,8 +2259,22 @@ static bool test_prompt(llama_context * ctx, int n_prompt, int n_batch, int n_th
+         // speculative round do), to see whether idle gaps change the GPU performance state
+         static const int sleep_us = getenv("MELD_BENCH_SLEEP_US") ? atoi(getenv("MELD_BENCH_SLEEP_US")) : 0;
+         if (res == 0 && g_dctx) {
++            // MELD_BENCH_DRAFT_BLOCK=N alternates blocks of N batches with and without draft steps, so both
++            // conditions see the same drift of the machine; "ppblk <drafting> <ms>" times each batch alone
++            static const int block = getenv("MELD_BENCH_DRAFT_BLOCK") ? atoi(getenv("MELD_BENCH_DRAFT_BLOCK")) : 0;
++            static int iter = 0;
++            static int64_t t_prev = 0;
+             llama_synchronize(ctx);
+-            bench_draft_steps(n_vocab);
++            const int64_t t_now = ggml_time_us();
++            const bool drafting = block <= 0 || (iter / block) % 2 == 1;
++            if (block > 0 && t_prev > 0) {
++                fprintf(stderr, "ppblk %d %.3f\n", (int) drafting, (t_now - t_prev) / 1000.0);
++            }
++            if (drafting) {
++                bench_draft_steps(n_vocab);
++            }
++            ++iter;
++            t_prev = ggml_time_us();
+         }
+         if (sleep_us > 0 && res == 0) {
+             llama_synchronize(ctx);

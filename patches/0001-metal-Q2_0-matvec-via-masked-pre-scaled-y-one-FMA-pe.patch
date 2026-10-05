@@ -1,0 +1,110 @@
+From c31f8234172cf1fe27f24370df8ab2cf0ec4ad47 Mon Sep 17 00:00:00 2001
+From: Tim <338195936+tim-meld@users.noreply.github.com>
+Date: Sun, 4 Oct 2026 20:01:54 +0800
+Subject: [PATCH 01/12] metal: Q2_0 matvec via masked pre-scaled y (one FMA per
+ weight)
+
+MoE decode at qwen4exp shapes (M2 Max): 4 tok 156 -> 183 GB/s, 8 tok 161 -> 199 GB/s.
+test-backend-ops MUL_MAT/MUL_MAT_ID q2_0: 122/122 pass.
+---
+ ggml/src/ggml-metal/kernels/mul_mv.metal | 79 +++++++++---------------
+ 1 file changed, 30 insertions(+), 49 deletions(-)
+
+diff --git a/ggml/src/ggml-metal/kernels/mul_mv.metal b/ggml/src/ggml-metal/kernels/mul_mv.metal
+index 8e2df27..7d22e14 100644
+--- a/ggml/src/ggml-metal/kernels/mul_mv.metal
++++ b/ggml/src/ggml-metal/kernels/mul_mv.metal
+@@ -29,53 +29,26 @@ inline float block_q_n_dot_y(device const block_q1_0 * qb_curr, float sumy, thre
+     return qb_curr->d * (2.0f * acc - sumy);
+ }
+ 
+-// Q2_0 dot: d * (sum_lo(y) + 2*sum_hi(y) - sumy) via per-bit conditional adds
++// Q2_0 dot over 16 weights: d * (sum(q*y) - sumy), q in 0..3 (weight = d*(q-1)).
++// The 16 quants are two uint16 words, element j at bits 2*(j%8) of word j/8. As for
++// q4_0, the caller pre-divides yl[j] by 4^(j%8), so (w & mask) * yl[j] == q*y[j]
++// without shifting: one AND + one FMA per weight instead of two selects + adds.
+ inline float block_q_n_dot_y(device const block_q2_0 * qb_curr, float sumy, thread float * yl, int il) {
+-    device const uint8_t * qs = qb_curr->qs + (il / 4);
+-    const uint8_t b0 = qs[0];
+-    const uint8_t b1 = qs[1];
+-    const uint8_t b2 = qs[2];
+-    const uint8_t b3 = qs[3];
+-
+-    // Accumulate where low bit is set (bits 0,2,4,6 of each byte)
+-    float acc_lo = 0.0f;
+-    acc_lo += select(0.0f, yl[ 0], bool(b0 & 0x01));
+-    acc_lo += select(0.0f, yl[ 1], bool(b0 & 0x04));
+-    acc_lo += select(0.0f, yl[ 2], bool(b0 & 0x10));
+-    acc_lo += select(0.0f, yl[ 3], bool(b0 & 0x40));
+-    acc_lo += select(0.0f, yl[ 4], bool(b1 & 0x01));
+-    acc_lo += select(0.0f, yl[ 5], bool(b1 & 0x04));
+-    acc_lo += select(0.0f, yl[ 6], bool(b1 & 0x10));
+-    acc_lo += select(0.0f, yl[ 7], bool(b1 & 0x40));
+-    acc_lo += select(0.0f, yl[ 8], bool(b2 & 0x01));
+-    acc_lo += select(0.0f, yl[ 9], bool(b2 & 0x04));
+-    acc_lo += select(0.0f, yl[10], bool(b2 & 0x10));
+-    acc_lo += select(0.0f, yl[11], bool(b2 & 0x40));
+-    acc_lo += select(0.0f, yl[12], bool(b3 & 0x01));
+-    acc_lo += select(0.0f, yl[13], bool(b3 & 0x04));
+-    acc_lo += select(0.0f, yl[14], bool(b3 & 0x10));
+-    acc_lo += select(0.0f, yl[15], bool(b3 & 0x40));
+-
+-    // Accumulate where high bit is set (bits 1,3,5,7 of each byte)
+-    float acc_hi = 0.0f;
+-    acc_hi += select(0.0f, yl[ 0], bool(b0 & 0x02));
+-    acc_hi += select(0.0f, yl[ 1], bool(b0 & 0x08));
+-    acc_hi += select(0.0f, yl[ 2], bool(b0 & 0x20));
+-    acc_hi += select(0.0f, yl[ 3], bool(b0 & 0x80));
+-    acc_hi += select(0.0f, yl[ 4], bool(b1 & 0x02));
+-    acc_hi += select(0.0f, yl[ 5], bool(b1 & 0x08));
+-    acc_hi += select(0.0f, yl[ 6], bool(b1 & 0x20));
+-    acc_hi += select(0.0f, yl[ 7], bool(b1 & 0x80));
+-    acc_hi += select(0.0f, yl[ 8], bool(b2 & 0x02));
+-    acc_hi += select(0.0f, yl[ 9], bool(b2 & 0x08));
+-    acc_hi += select(0.0f, yl[10], bool(b2 & 0x20));
+-    acc_hi += select(0.0f, yl[11], bool(b2 & 0x80));
+-    acc_hi += select(0.0f, yl[12], bool(b3 & 0x02));
+-    acc_hi += select(0.0f, yl[13], bool(b3 & 0x08));
+-    acc_hi += select(0.0f, yl[14], bool(b3 & 0x20));
+-    acc_hi += select(0.0f, yl[15], bool(b3 & 0x80));
+-
+-    return qb_curr->d * (acc_lo + 2.0f * acc_hi - sumy);
++    device const uint16_t * qs = (device const uint16_t *) qb_curr->qs + (il / 8);
++    const uint16_t w0 = qs[0];
++    const uint16_t w1 = qs[1];
++
++    float acc[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
++    acc[0] += yl[ 0] * (w0 & 0x0003) + yl[ 4] * (w0 & 0x0300);
++    acc[1] += yl[ 1] * (w0 & 0x000C) + yl[ 5] * (w0 & 0x0C00);
++    acc[2] += yl[ 2] * (w0 & 0x0030) + yl[ 6] * (w0 & 0x3000);
++    acc[3] += yl[ 3] * (w0 & 0x00C0) + yl[ 7] * (w0 & 0xC000);
++    acc[0] += yl[ 8] * (w1 & 0x0003) + yl[12] * (w1 & 0x0300);
++    acc[1] += yl[ 9] * (w1 & 0x000C) + yl[13] * (w1 & 0x0C00);
++    acc[2] += yl[10] * (w1 & 0x0030) + yl[14] * (w1 & 0x3000);
++    acc[3] += yl[11] * (w1 & 0x00C0) + yl[15] * (w1 & 0xC000);
++
++    return qb_curr->d * (acc[0] + acc[1] + acc[2] + acc[3] - sumy);
+ }
+ 
+ // function for calculate inner product between half a q4_0 block and 16 floats (yl), sumy is SUM(yl[i])
+@@ -427,9 +400,17 @@ void kernel_mul_mv_q2_0_f32_impl(
+     for (int ib = ix; ib < nb; ib += N_SIMDWIDTH/4) {
+         float sumy = 0.f;
+ 
+-        FOR_UNROLL (short i = 0; i < 16; i++) {
+-            yl[i] = yb[i];
+-            sumy += yb[i];
++        // pre-scale by 4^-(i%8) so the dot can use masked (unshifted) quants
++        FOR_UNROLL (short i = 0; i < 16; i += 8) {
++            sumy += yb[i+0] + yb[i+1] + yb[i+2] + yb[i+3] + yb[i+4] + yb[i+5] + yb[i+6] + yb[i+7];
++            yl[i+0] = yb[i+0];
++            yl[i+1] = yb[i+1]/4.f;
++            yl[i+2] = yb[i+2]/16.f;
++            yl[i+3] = yb[i+3]/64.f;
++            yl[i+4] = yb[i+4]/256.f;
++            yl[i+5] = yb[i+5]/1024.f;
++            yl[i+6] = yb[i+6]/4096.f;
++            yl[i+7] = yb[i+7]/16384.f;
+         }
+ 
+         FOR_UNROLL (short row = 0; row < nr0; row++) {

@@ -1,0 +1,103 @@
+From d78e6c3018122d1ab0e5ba17af9f799ba337e8db Mon Sep 17 00:00:00 2001
+From: Tim <338195936+tim-meld@users.noreply.github.com>
+Date: Sun, 4 Oct 2026 21:31:19 +0800
+Subject: [PATCH 02/12] metal: small-batch matvec for f32/f16/bf16 rows with
+ ne00 % 64 == 0; GGML_METAL_ABLATE switch
+
+1) The mul_mv_ext kernel's thread step is 16*nxpsg elements without a bounds check, so nxpsg = 4
+only needs ne00 % 64 == 0; the old gate (ne00 % 128) sent e.g. qwen4exp's hyper-connection gate
+(K = 320, bf16) to the per-token matvec, which re-reads the weights for every token.
+qwen4exp IQ3_S 24-layer proxy, M2 Max, two interleaved rounds:
+pp4 102-103 -> 116 tok/s (+13%), pp8 131-132 -> 153-155 (+17%), pp1 unchanged.
+test-backend-ops: MUL_MAT f32/f16/bf16 585/585, model bf16 shapes 18/18.
+
+2) Profiling aid: GGML_METAL_ABLATE="OP[:src0type],..." skips encoding matching nodes, so the
+speed-up shows what those ops cost inside the real graph (isolated-op timing misleads).
+---
+ ggml/src/ggml-metal/ggml-metal-ops.cpp | 55 +++++++++++++++++++++++++-
+ 1 file changed, 54 insertions(+), 1 deletion(-)
+
+diff --git a/ggml/src/ggml-metal/ggml-metal-ops.cpp b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+index 29db37f..14b4036 100644
+--- a/ggml/src/ggml-metal/ggml-metal-ops.cpp
++++ b/ggml/src/ggml-metal/ggml-metal-ops.cpp
+@@ -1,3 +1,6 @@
++#include <cstdlib>
++#include <vector>
++#include <string>
+ #include "ggml-metal-ops.h"
+ 
+ #include "ggml.h"
+@@ -180,6 +183,45 @@ static bool ggml_metal_op_concurrency_add(ggml_metal_op_t ctx, const ggml_tensor
+     return ggml_mem_ranges_add(ctx->mem_ranges, node);
+ }
+ 
++// Profiling aid (meld-turbo): GGML_METAL_ABLATE="OP[:src0type],..." skips encoding matching nodes,
++// e.g. GGML_METAL_ABLATE="MUL_MAT:q6_K,MUL". Results become garbage; the speed-up measures what those
++// ops really cost inside the full graph (with concurrency and real cache state), which timing ops in
++// isolation does not. Never list ops that produce indices (ARGSORT, TOP_K, ...): later ops would read
++// out of bounds.
++static bool ggml_metal_op_ablated(const struct ggml_tensor * node) {
++    static const std::vector<std::pair<std::string, std::string>> rules = [] {
++        std::vector<std::pair<std::string, std::string>> r;
++        const char * env = getenv("GGML_METAL_ABLATE");
++        if (!env) {
++            return r;
++        }
++        std::string s(env);
++        size_t p = 0;
++        while (p <= s.size()) {
++            size_t q = s.find(',', p);
++            if (q == std::string::npos) q = s.size();
++            std::string item = s.substr(p, q - p);
++            if (!item.empty()) {
++                size_t c = item.find(':');
++                r.emplace_back(item.substr(0, c), c == std::string::npos ? "" : item.substr(c + 1));
++                GGML_LOG_WARN("%s: ablating %s\n", __func__, item.c_str());
++            }
++            p = q + 1;
++        }
++        return r;
++    }();
++    if (rules.empty()) {
++        return false;
++    }
++    const std::string op = ggml_op_desc(node);
++    for (const auto & [rop, rtype] : rules) {
++        if (rop == op && (rtype.empty() || (node->src[0] && rtype == ggml_type_name(node->src[0]->type)))) {
++            return true;
++        }
++    }
++    return false;
++}
++
+ static int ggml_metal_op_encode_impl(ggml_metal_op_t ctx, int idx) {
+     struct ggml_tensor * node = ctx->node(idx);
+ 
+@@ -189,6 +231,10 @@ static int ggml_metal_op_encode_impl(ggml_metal_op_t ctx, int idx) {
+         return 1;
+     }
+ 
++    if (ggml_metal_op_ablated(node)) {
++        return 1;
++    }
++
+     switch (node->op) {
+         case GGML_OP_NONE:
+         case GGML_OP_RESHAPE:
+@@ -2441,7 +2487,14 @@ int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {
+ 
+     // first try to use small-batch mat-mv kernels
+     // these should be efficient for BS [2, ~8]
+-    if (op->src[1]->type == GGML_TYPE_F32 && (ne00%128 == 0) &&
++    //
++    // meld-turbo: a thread step covers 16*nxpsg elements and the inner loop has no bounds check, so
++    // nxpsg = 8 needs ne00 % 128 == 0 and nxpsg = 4 needs ne00 % 64 == 0. Plain float rows (f32/f16/bf16)
++    // with ne00 % 64 == 0 (e.g. qwen4exp's hyper-connection gate, K = 320) can use the kernel with nxpsg = 4
++    // instead of the per-token matvec, which re-reads the weights for every token of a small batch.
++    const bool ext_float_row = (op->src[0]->type == GGML_TYPE_F32 || op->src[0]->type == GGML_TYPE_F16 ||
++                                op->src[0]->type == GGML_TYPE_BF16) && ne00 % 64 == 0;
++    if (op->src[1]->type == GGML_TYPE_F32 && (ne00%128 == 0 || ext_float_row) &&
+         (
+          (
+           (

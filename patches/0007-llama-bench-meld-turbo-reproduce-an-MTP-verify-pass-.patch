@@ -1,0 +1,123 @@
+From 9b7812de761135f190d1be1dd76f9df30805d820 Mon Sep 17 00:00:00 2001
+From: Tim <338195936+tim-meld@users.noreply.github.com>
+Date: Mon, 5 Oct 2026 07:06:05 +0800
+Subject: [PATCH 07/12] llama-bench (meld-turbo): reproduce an MTP verify pass
+ - MELD_BENCH_RS (rollback snapshots), MELD_BENCH_ALL_LOGITS,
+ MELD_BENCH_NEXTN, MELD_BENCH_NCTX, MELD_BENCH_TEXT (real-text tokens);
+ test-backend-ops perf cases for HC / q8_0 / DeltaNet shapes
+
+---
+ tests/test-backend-ops.cpp        |  6 ++++
+ tools/llama-bench/llama-bench.cpp | 48 ++++++++++++++++++++++++++++++-
+ 2 files changed, 53 insertions(+), 1 deletion(-)
+
+diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
+index ca51162..380b696 100644
+--- a/tests/test-backend-ops.cpp
++++ b/tests/test-backend-ops.cpp
+@@ -11127,6 +11127,12 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
+ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
+     std::vector<std::unique_ptr<test_case>> test_cases;
+ 
++    // meld-turbo: qwen4exp DeltaNet at verify (4 tokens, 48 heads x 128): final state only vs 4 rollback snapshots
++    for (int64_t K : {1, 4}) {
++        test_cases.emplace_back(new test_gated_delta_net(GGML_TYPE_F32, 48, 128, 4, 1, 1, false, false, K));
++        test_cases.emplace_back(new test_gated_delta_net(GGML_TYPE_F32, 48, 128, 1, 1, 1, false, false, K == 4 ? 2 : 1));
++    }
++
+     // meld-turbo: qwen4exp hyper-connection read at decode/verify shapes, fused vs its two big mat-vecs
+     for (int nt : {1, 4}) {
+         test_cases.emplace_back(new test_hc_mix(GGML_TYPE_BF16, 2560, 4, 320, 4, nt));
+diff --git a/tools/llama-bench/llama-bench.cpp b/tools/llama-bench/llama-bench.cpp
+index 6541bb5..e7be98f 100644
+--- a/tools/llama-bench/llama-bench.cpp
++++ b/tools/llama-bench/llama-bench.cpp
+@@ -8,6 +8,7 @@
+ #include <cstdio>
+ #include <cstdlib>
+ #include <cstring>
++#include <fstream>
+ #include <ctime>
+ #include <iterator>
+ #include <map>
+@@ -18,6 +19,7 @@
+ #include <thread>
+ #include <vector>
+ #include <unordered_set>
++#include "../../src/llama-ext.h" // meld-turbo: llama_set_embeddings_nextn (MELD_BENCH_NEXTN)
+ 
+ #include "arg.h"
+ #include "build-info.h"
+@@ -1301,6 +1303,14 @@ struct cmd_params_instance {
+         cparams.op_offload      = !no_op_offload;
+         cparams.swa_full        = false;
+ 
++        // meld-turbo: reproduce an MTP verify pass of llama-server (MELD_BENCH_RS = rollback snapshots per seq)
++        if (getenv("MELD_BENCH_NCTX")) {
++            cparams.n_ctx = atoi(getenv("MELD_BENCH_NCTX"));
++        }
++        if (getenv("MELD_BENCH_RS")) {
++            cparams.n_rs_seq = atoi(getenv("MELD_BENCH_RS"));
++        }
++
+         return cparams;
+     }
+ };
+@@ -2145,13 +2155,44 @@ static bool test_prompt(llama_context * ctx, int n_prompt, int n_batch, int n_th
+ 
+     int n_processed = 0;
+ 
++    // meld-turbo: MELD_BENCH_TEXT=<file> feeds consecutive tokens of a real text instead of random ids
++    // (expert routing of random ids is not that of real text)
++    static std::vector<llama_token> text_tokens;
++    static size_t text_pos = 0;
++    if (getenv("MELD_BENCH_TEXT") && text_tokens.empty()) {
++        std::ifstream f(getenv("MELD_BENCH_TEXT"));
++        std::string txt((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
++        text_tokens.resize(txt.size() + 16);
++        const int n = llama_tokenize(vocab, txt.c_str(), txt.size(), text_tokens.data(), text_tokens.size(), false, false);
++        text_tokens.resize(std::max(0, n));
++    }
++
+     while (n_processed < n_prompt) {
+         int n_tokens = std::min(n_prompt - n_processed, n_batch);
+         tokens[0]    = n_processed == 0 && llama_vocab_get_add_bos(vocab) ? llama_vocab_bos(vocab) : std::rand() % n_vocab;
+         for (int i = 1; i < n_tokens; i++) {
+             tokens[i] = std::rand() % n_vocab;
+         }
+-        int res = llama_decode(ctx, llama_batch_get_one(tokens.data(), n_tokens));
++        if (!text_tokens.empty()) {
++            for (int i = 0; i < n_tokens; i++) {
++                tokens[i] = text_tokens[text_pos++ % text_tokens.size()];
++            }
++        }
++        // meld-turbo: MELD_BENCH_ALL_LOGITS=1 asks for logits of every token, as a speculative verify does
++        static const bool all_logits = getenv("MELD_BENCH_ALL_LOGITS") != nullptr;
++        int res;
++        if (all_logits) {
++            llama_batch b = llama_batch_init(n_tokens, 0, 1);
++            const llama_pos p0 = llama_memory_seq_pos_max(llama_get_memory(ctx), 0) + 1;
++            for (int i = 0; i < n_tokens; ++i) {
++                b.token[i] = tokens[i]; b.pos[i] = p0 + i; b.n_seq_id[i] = 1; b.seq_id[i][0] = 0; b.logits[i] = 1;
++            }
++            b.n_tokens = n_tokens;
++            res = llama_decode(ctx, b);
++            llama_batch_free(b);
++        } else {
++            res = llama_decode(ctx, llama_batch_get_one(tokens.data(), n_tokens));
++        }
+         if (res != 0) {
+             fprintf(stderr, "%s: failed to decode prompt batch, res = %d\n", __func__, res);
+             return false;
+@@ -2342,6 +2383,11 @@ int llama_bench(int argc, char ** argv) {
+             return 1;
+         }
+ 
++        // meld-turbo: MELD_BENCH_NEXTN=1 also returns the hidden states the MTP draft head reads
++        if (getenv("MELD_BENCH_NEXTN")) {
++            llama_set_embeddings_nextn(ctx, true, /*masked*/ false);
++        }
++
+         test t(inst, lmodel, ctx);
+ 
+         llama_memory_clear(llama_get_memory(ctx), false);

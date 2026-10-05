@@ -1,0 +1,54 @@
+From 5f92adc3133665df693197e6b4f48a1f3387acb1 Mon Sep 17 00:00:00 2001
+From: Tim <338195936+tim-meld@users.noreply.github.com>
+Date: Mon, 5 Oct 2026 08:57:13 +0800
+Subject: [PATCH 11/12] llama-bench (meld-turbo): MELD_BENCH_DUMP_TOPK=<file>
+ dumps the experts every MoE layer selects
+
+---
+ tools/llama-bench/llama-bench.cpp | 26 ++++++++++++++++++++++++++
+ 1 file changed, 26 insertions(+)
+
+diff --git a/tools/llama-bench/llama-bench.cpp b/tools/llama-bench/llama-bench.cpp
+index 4e63561..539548a 100644
+--- a/tools/llama-bench/llama-bench.cpp
++++ b/tools/llama-bench/llama-bench.cpp
+@@ -20,6 +20,27 @@
+ #include <vector>
+ #include <unordered_set>
+ #include "../../src/llama-ext.h" // meld-turbo: llama_set_embeddings_nextn (MELD_BENCH_NEXTN)
++#include "ggml-backend.h"
++
++// meld-turbo: MELD_BENCH_DUMP_TOPK=<file> writes the expert ids every MoE layer picks ("ffn_moe_topk-<il>"):
++//   one line per layer and batch: <il> <n_tokens> <n_used> ids...
++static FILE * g_topk_out = nullptr;
++static bool bench_topk_cb(struct ggml_tensor * t, bool ask, void * /*ud*/) {
++    if (strncmp(t->name, "ffn_moe_topk", 12) != 0) {
++        return false;
++    }
++    if (ask) {
++        return true;
++    }
++    std::vector<int32_t> ids(ggml_nelements(t));
++    ggml_backend_tensor_get(t, ids.data(), 0, ids.size()*sizeof(int32_t));
++    const char * dash = strrchr(t->name, '-');
++    fprintf(g_topk_out, "%s %lld %lld", dash ? dash + 1 : "?", (long long) t->ne[1], (long long) t->ne[0]);
++    for (int32_t id : ids) fprintf(g_topk_out, " %d", id);
++    fprintf(g_topk_out, "\n");
++    return true;
++}
++
+ 
+ #include "arg.h"
+ #include "build-info.h"
+@@ -1303,6 +1324,11 @@ struct cmd_params_instance {
+         cparams.op_offload      = !no_op_offload;
+         cparams.swa_full        = false;
+ 
++        if (getenv("MELD_BENCH_DUMP_TOPK")) {
++            g_topk_out = fopen(getenv("MELD_BENCH_DUMP_TOPK"), "w");
++            cparams.cb_eval           = bench_topk_cb;
++            cparams.cb_eval_user_data = nullptr;
++        }
+         // meld-turbo: reproduce an MTP verify pass of llama-server (MELD_BENCH_RS = rollback snapshots per seq)
+         if (getenv("MELD_BENCH_NCTX")) {
+             cparams.n_ctx = atoi(getenv("MELD_BENCH_NCTX"));

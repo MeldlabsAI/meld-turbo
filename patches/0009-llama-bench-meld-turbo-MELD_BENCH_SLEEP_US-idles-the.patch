@@ -1,0 +1,28 @@
+From af5f4d2c527b65e56a3d6bb8a6cc17b925f40a25 Mon Sep 17 00:00:00 2001
+From: Tim <338195936+tim-meld@users.noreply.github.com>
+Date: Mon, 5 Oct 2026 07:44:53 +0800
+Subject: [PATCH 09/12] llama-bench (meld-turbo): MELD_BENCH_SLEEP_US idles the
+ GPU after every batch
+
+---
+ tools/llama-bench/llama-bench.cpp | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/tools/llama-bench/llama-bench.cpp b/tools/llama-bench/llama-bench.cpp
+index e7be98f..47deb50 100644
+--- a/tools/llama-bench/llama-bench.cpp
++++ b/tools/llama-bench/llama-bench.cpp
+@@ -2193,6 +2193,13 @@ static bool test_prompt(llama_context * ctx, int n_prompt, int n_batch, int n_th
+         } else {
+             res = llama_decode(ctx, llama_batch_get_one(tokens.data(), n_tokens));
+         }
++        // meld-turbo: MELD_BENCH_SLEEP_US=<us> idles the GPU after every batch (as the draft steps of a
++        // speculative round do), to see whether idle gaps change the GPU performance state
++        static const int sleep_us = getenv("MELD_BENCH_SLEEP_US") ? atoi(getenv("MELD_BENCH_SLEEP_US")) : 0;
++        if (sleep_us > 0 && res == 0) {
++            llama_synchronize(ctx);
++            std::this_thread::sleep_for(std::chrono::microseconds(sleep_us));
++        }
+         if (res != 0) {
+             fprintf(stderr, "%s: failed to decode prompt batch, res = %d\n", __func__, res);
+             return false;

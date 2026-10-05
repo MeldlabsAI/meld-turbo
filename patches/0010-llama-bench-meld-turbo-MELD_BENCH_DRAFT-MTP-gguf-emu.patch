@@ -1,0 +1,100 @@
+From d055861c45c9272fccb4d7ab6b1a4aa69c7861e4 Mon Sep 17 00:00:00 2001
+From: Tim <338195936+tim-meld@users.noreply.github.com>
+Date: Mon, 5 Oct 2026 08:47:35 +0800
+Subject: [PATCH 10/12] llama-bench (meld-turbo): MELD_BENCH_DRAFT=<MTP gguf>
+ emulates the draft steps of a speculative round between batches
+ (MELD_BENCH_DRAFT_STEPS, MELD_BENCH_DRAFT_NOSYNC)
+
+---
+ tools/llama-bench/llama-bench.cpp | 64 +++++++++++++++++++++++++++++++
+ 1 file changed, 64 insertions(+)
+
+diff --git a/tools/llama-bench/llama-bench.cpp b/tools/llama-bench/llama-bench.cpp
+index 47deb50..4e63561 100644
+--- a/tools/llama-bench/llama-bench.cpp
++++ b/tools/llama-bench/llama-bench.cpp
+@@ -2144,6 +2144,42 @@ struct ctx_state {
+     std::vector<uint8_t> buf; // the llama_context state buffer
+ };
+ 
++// meld-turbo: MELD_BENCH_DRAFT=<MTP gguf> runs MELD_BENCH_DRAFT_STEPS (default 4) single-token MTP draft
++// decodes after every batch, as llama-server's speculative rounds do (inputs are dummies; only the GPU load matters)
++static llama_context * g_dctx  = nullptr;
++static llama_batch     g_dbatch;
++static int             g_dpos  = 0;
++static int             g_dembd = 0;
++
++static void bench_draft_steps(int n_vocab) {
++    if (!g_dctx) {
++        return;
++    }
++    static const int steps = getenv("MELD_BENCH_DRAFT_STEPS") ? atoi(getenv("MELD_BENCH_DRAFT_STEPS")) : 4;
++    for (int k = 0; k < steps; ++k) {
++        if (g_dpos + 2 >= (int) llama_n_ctx(g_dctx)) {
++            llama_memory_clear(llama_get_memory(g_dctx), false);
++            g_dpos = 0;
++        }
++        g_dbatch.n_tokens     = 1;
++        g_dbatch.token[0]     = std::rand() % n_vocab;
++        g_dbatch.pos[0]       = g_dpos++;
++        g_dbatch.n_seq_id[0]  = 1;
++        g_dbatch.seq_id[0][0] = 0;
++        g_dbatch.logits[0]    = 1;
++        if (llama_decode(g_dctx, g_dbatch) != 0) {
++            fprintf(stderr, "draft decode failed\n");
++            return;
++        }
++        // MELD_BENCH_DRAFT_NOSYNC=1: submit the steps back to back (no CPU round trip in between)
++        static const bool nosync = getenv("MELD_BENCH_DRAFT_NOSYNC") != nullptr;
++        if (!nosync) {
++            llama_synchronize(g_dctx);
++        }
++    }
++    llama_synchronize(g_dctx);
++}
++
+ static bool test_prompt(llama_context * ctx, int n_prompt, int n_batch, int n_threads) {
+     llama_set_n_threads(ctx, n_threads, n_threads);
+ 
+@@ -2196,6 +2232,10 @@ static bool test_prompt(llama_context * ctx, int n_prompt, int n_batch, int n_th
+         // meld-turbo: MELD_BENCH_SLEEP_US=<us> idles the GPU after every batch (as the draft steps of a
+         // speculative round do), to see whether idle gaps change the GPU performance state
+         static const int sleep_us = getenv("MELD_BENCH_SLEEP_US") ? atoi(getenv("MELD_BENCH_SLEEP_US")) : 0;
++        if (res == 0 && g_dctx) {
++            llama_synchronize(ctx);
++            bench_draft_steps(n_vocab);
++        }
+         if (sleep_us > 0 && res == 0) {
+             llama_synchronize(ctx);
+             std::this_thread::sleep_for(std::chrono::microseconds(sleep_us));
+@@ -2394,6 +2434,30 @@ int llama_bench(int argc, char ** argv) {
+         if (getenv("MELD_BENCH_NEXTN")) {
+             llama_set_embeddings_nextn(ctx, true, /*masked*/ false);
+         }
++        if (getenv("MELD_BENCH_DRAFT") && !g_dctx) {
++            llama_model_params dmp = llama_model_default_params();
++            dmp.n_gpu_layers = 999;
++            dmp.load_mtp     = true;
++            llama_model * dmodel = llama_model_load_from_file(getenv("MELD_BENCH_DRAFT"), dmp);
++            llama_context_params dcp = llama_context_default_params();
++            dcp.n_ctx     = 4096;
++            dcp.n_batch   = 512;
++            dcp.n_ubatch  = 512;
++            dcp.ctx_type  = LLAMA_CONTEXT_TYPE_MTP;
++            dcp.ctx_other = ctx;
++            dcp.flash_attn_type = cparams.flash_attn_type;
++            g_dctx = dmodel ? llama_init_from_model(dmodel, dcp) : nullptr;
++            if (g_dctx) {
++                llama_set_embeddings_nextn(g_dctx, true, /*masked*/ true);
++                g_dembd = llama_model_n_embd_out(dmodel);
++                g_dbatch = llama_batch_init(1, g_dembd, 1);
++                g_dbatch.token = (llama_token *) malloc(sizeof(llama_token));
++                memset(g_dbatch.embd, 0, sizeof(float) * g_dembd);
++                fprintf(stderr, "meld-turbo: emulating MTP draft steps with '%s'\n", getenv("MELD_BENCH_DRAFT"));
++            } else {
++                fprintf(stderr, "meld-turbo: failed to load the draft model\n");
++            }
++        }
+ 
+         test t(inst, lmodel, ctx);
+ 

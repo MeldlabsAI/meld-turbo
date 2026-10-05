@@ -1,0 +1,11 @@
+Meld Turbo — third-party components
+
+- llama.cpp — MIT License, Copyright (c) 2023-2026 The ggml authors.
+  The patches in patches/ modify llama.cpp and are distributed under the same MIT License.
+- Unsloth's MTP branch of llama.cpp (github.com/danielhanchen/llama.cpp, branch qwen4exp/mtp) — MIT License.
+- Strata (github.com/Niko1221/Strata) — MIT License, Copyright (c) 2026 Niko1221 and the Strata contributors.
+  data/draft_vocab.bin (the MTP draft token list) is taken from Strata and redistributed under its MIT License.
+- Model weights (Qwen3.8-Flash-Next by the Qwen team; GSQ-RCO GGUF by ISTA-DASLab; MTP GGUF by Unsloth)
+  are not included and are under their own licenses.
+
+The MIT License text that applies to llama.cpp, Unsloth's branch and Strata is the same as in LICENSE.
